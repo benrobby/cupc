@@ -68,5 +68,10 @@ year = {2020},
 volume = {31},
 number = {3},
 pages = {530 - 542}
-} 
+}
 ```
+
+
+## CHANGES
+
+* added timing information return to cupc function

@@ -1,5 +1,6 @@
 library(pcalg)
 
+cupc_class <- setRefClass("cupc_class", fields = list(res = "pcAlgo", edgetime = "numeric", skeltime = "numeric", kernel_time = "numeric"))
 
 cu_pc <- function(suffStat, indepTest, alpha, labels, p,
                       fixedGaps = NULL, fixedEdges = NULL, NAdelete = TRUE, m.max = Inf,
@@ -7,7 +8,7 @@ cu_pc <- function(suffStat, indepTest, alpha, labels, p,
                       skel.method = c("stable", "original", "stable.fast"),
                       conservative = FALSE, maj.rule = FALSE,
                       solve.confl = FALSE, verbose = FALSE)
-{ 
+{
   ## Initial Checks
   cl <- match.call()
   if(!missing(p)) stopifnot(is.numeric(p), length(p <- as.integer(p)) == 1, p >= 2)
@@ -24,46 +25,59 @@ cu_pc <- function(suffStat, indepTest, alpha, labels, p,
       message("No need to specify 'p', when 'labels' is given")
   }
   seq_p <- seq_len(p)
-  
+
   u2pd <- match.arg(u2pd)
   skel.method <- match.arg(skel.method)
   if(u2pd != "relaxed") {
     if (conservative || maj.rule)
       stop("Conservative PC and majority rule PC can only be run with 'u2pd = relaxed'")
-    
+
     if (solve.confl)
       stop("Versions of PC using lists for the orientation rules (and possibly bi-directed edges)\n can only be run with 'u2pd = relaxed'")
   }
-  
+
   if (conservative && maj.rule) stop("Choose either conservative PC or majority rule PC!")
-  
+
   ## Skeleton
-  skel <- cu_skeleton(suffStat, indepTest, alpha, labels=labels, NAdelete=NAdelete, m.max=m.max, verbose=verbose)
+  start.time <- Sys.time()
+  skeleton_res <- cu_skeleton(suffStat, indepTest, alpha, labels=labels, NAdelete=NAdelete, m.max=m.max, verbose=verbose)
+  skel <- skeleton_res$res
+  kernel_time <- skeleton_res$kernel_time
+
+  end.time <- Sys.time()
+  skeltime <- end.time - start.time
+
   skel@call <- cl # so that makes it into result
-  
+
+  start.time <- Sys.time()
+
   ## Orient edges
   if (!conservative && !maj.rule) {
     switch (u2pd,
-            "rand" = udag2pdag(skel),
-            "retry" = udag2pdagSpecial(skel)$pcObj,
-            "relaxed" = udag2pdagRelaxed(skel, verbose=verbose))
-    
+            "rand" = res <- udag2pdag(skel),
+            "retry" = res <- udag2pdagSpecial(skel)$pcObj,
+            "relaxed" = res <- udag2pdagRelaxed(skel, verbose=verbose))
+
   }
   else { ## u2pd "relaxed" : conservative _or_ maj.rule
-    
+
     ## version.unf defined per default
     ## Tetrad CPC works with version.unf=c(2,1)
     ## see comment on pc.cons.intern for description of version.unf
     pc. <- pc.cons.intern(skel, suffStat, indepTest, alpha,
                           version.unf=c(2,1), maj.rule=maj.rule, verbose=verbose)
-    udag2pdagRelaxed(pc.$sk, verbose=verbose,
+    res <- udag2pdagRelaxed(pc.$sk, verbose=verbose,
                      unfVect=pc.$unfTripl)
   }
+  end.time <- Sys.time()
+  edgetime <- end.time - start.time
+
+  new("cupc_class", res=res, skeltime=as.numeric(skeltime, units="secs"), edgetime=as.numeric(edgetime, units="secs"), kernel_time=as.numeric(kernel_time, units="secs"))
 }
 
 
 cu_skeleton <- function(suffStat, indepTest, alpha, labels, p, m.max = Inf, NAdelete = TRUE, verbose = FALSE)
-{ 
+{
   cl <- match.call()
   if(!missing(p)) stopifnot(is.numeric(p), length(p <- as.integer(p)) == 1, p >= 2)
   if(missing(labels)) {
@@ -78,7 +92,7 @@ cu_skeleton <- function(suffStat, indepTest, alpha, labels, p, m.max = Inf, NAde
     else
       message("No need to specify 'p', when 'labels' is given")
   }
-  
+
   seq_p <- seq_len(p)
   pval <- NULL
   #Convert SepsetMatrix to sepset
@@ -88,7 +102,7 @@ cu_skeleton <- function(suffStat, indepTest, alpha, labels, p, m.max = Inf, NAde
   number_of_levels = 50
   threshold <- matrix(0, nrow = 1, ncol = number_of_levels)
   for (i in 0:(min(number_of_levels, suffStat$n - 3) - 1)){
-    threshold[i] <- abs(qnorm((alpha/2), mean = 0, sd = 1)/sqrt(suffStat$n - i - 3))  
+    threshold[i] <- abs(qnorm((alpha/2), mean = 0, sd = 1)/sqrt(suffStat$n - i - 3))
   }
 
   G <- matrix(TRUE, nrow = p, ncol = p)
@@ -102,11 +116,11 @@ cu_skeleton <- function(suffStat, indepTest, alpha, labels, p, m.max = Inf, NAde
   } else{
     max_level = m.max
   }
-  
+
   sepsetMatrix <- matrix(-1, nrow = p * p, ncol = 14)
   dyn.load("Skeleton.so")
 
-  start_time <- proc.time()
+  start_time <- Sys.time()
   z <- .C("Skeleton",
         C = as.double(suffStat$C),
         p = as.integer(p),
@@ -116,14 +130,15 @@ cu_skeleton <- function(suffStat, indepTest, alpha, labels, p, m.max = Inf, NAde
         max_level = as.integer(max_level),
         pmax = as.double(pMax),
         sepsetmat = as.integer(sepsetMatrix))
-  
+  kernel_time <- Sys.time() - start_time
+
   ord <- z$l
   G <- (matrix(z$G, nrow = p, ncol = p)) > 0
-  
-  pMax <- (matrix(z$pmax, nrow = p, ncol = p)) 
+
+  pMax <- (matrix(z$pmax, nrow = p, ncol = p))
   pMax[which(pMax == -100000)] <- -Inf
   if(ord <= 14){
-    sepsetMatrix <- t(matrix(z$sepsetmat, nrow = 14, ncol = p ^ 2))	  
+    sepsetMatrix <- t(matrix(z$sepsetmat, nrow = 14, ncol = p ^ 2))
     index_of_cuted_edge <- row(sepsetMatrix)[which(sepsetMatrix != -1)]
     for (i in index_of_cuted_edge) {
       y <- floor(i / p) + 1
@@ -151,8 +166,9 @@ cu_skeleton <- function(suffStat, indepTest, alpha, labels, p, m.max = Inf, NAde
       as(G,"graphNEL")
     }
   ## final object
-  new("pcAlgo", graph = Gobject, call = cl, n = integer(0),
+  res <- new("pcAlgo", graph = Gobject, call = cl, n = integer(0),
       max.ord = as.integer(ord - 1), n.edgetests = 0,
       sepset = sepset, pMax = pMax, zMin = matrix(NA, 1, 1))
 
+  list("res" = res, "kernel_time" = kernel_time)
 }## end{ skeleton }
